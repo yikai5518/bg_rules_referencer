@@ -7,7 +7,7 @@ from bg_rules_referencer.agents.orchestrator import OrchestratorAgent
 from bg_rules_referencer.agents.rules_judge import RulesJudgeAgent
 
 
-def build_workflow():
+def build_workflow(checkpointer=None):
     # Initialize the graph with the Pydantic state schema
     workflow = StateGraph(AgentState)
 
@@ -31,6 +31,10 @@ def build_workflow():
     workflow.add_edge("rules_judge", END)
 
     # Compile the graph
+    if checkpointer:
+        return workflow.compile(
+            checkpointer=checkpointer, interrupt_before=["librarian"]
+        )
     return workflow.compile()
 
 
