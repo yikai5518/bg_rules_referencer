@@ -13,9 +13,19 @@ class AgentState(BaseModel):
 
     messages: Annotated[List[BaseMessage], operator.add] = Field(default_factory=list)
     game_name: Optional[str] = None
+    rulebook_filename: Optional[str] = None
     rulebook_text: Optional[str] = None
+    query_intent: Optional[str] = None
+    keywords: List[str] = Field(default_factory=list)
     relevant_chunks: List[str] = Field(default_factory=list)
+    highlight_snippets: List[str] = Field(default_factory=list)
+    referenced_pages: List[int] = Field(default_factory=list)
     final_answer: Optional[str] = None
+
+    # Preserved optional fields for backwards compatibility
+    bgg_id: Optional[str] = None
+    game_options: List[Dict[str, str]] = Field(default_factory=list)
+    rulebook_url: Optional[str] = None
 
 
 class BaseAgent(BaseModel, ABC):
