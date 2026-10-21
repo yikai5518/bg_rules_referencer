@@ -1,4 +1,5 @@
 import io
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,12 +30,17 @@ _converter_instance: DocumentConverter | None = None
 def get_docling_converter() -> DocumentConverter:
     """
     Returns a cached instance of DocumentConverter configured for fast digital PDF conversion
-    with OCR disabled.
+    with OCR disabled, table structure prediction disabled for speed, and tuned thread allocation.
     """
     global _converter_instance
     if _converter_instance is None:
         pipeline_options = PdfPipelineOptions()
         pipeline_options.do_ocr = False
+        pipeline_options.do_table_structure = False
+        # Set accelerator thread count (default 2 to match cloud vCPU allocation without thrashing)
+        num_threads = int(os.getenv("DOCLING_NUM_THREADS", "2"))
+        pipeline_options.accelerator_options.num_threads = num_threads
+
         _converter_instance = DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)

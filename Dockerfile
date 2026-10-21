@@ -20,6 +20,20 @@ COPY pyproject.toml uv.lock ./
 # Install all dependencies into the system python environment
 RUN uv pip install --system -e .
 
+# Pre-download and cache Docling model weights during build to prevent runtime latency
+RUN python -c "\
+from docling.datamodel.pipeline_options import PdfPipelineOptions; \
+from docling.document_converter import DocumentConverter, PdfFormatOption; \
+from docling.datamodel.base_models import InputFormat, DocumentStream; \
+import io, fitz; \
+opts = PdfPipelineOptions(); \
+opts.do_ocr = False; \
+opts.do_table_structure = False; \
+conv = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}); \
+doc = fitz.open(); \
+doc.new_page().insert_text((50, 50), 'Warmup'); \
+conv.convert(DocumentStream(name='warmup.pdf', stream=io.BytesIO(doc.tobytes())))"
+
 # Copy project files
 COPY . .
 
