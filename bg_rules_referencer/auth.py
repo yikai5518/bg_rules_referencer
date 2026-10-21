@@ -6,13 +6,29 @@ import streamlit as st
 
 
 def get_auth_config() -> dict[str, Any]:
-    """Safely retrieves the [auth] dictionary from Streamlit secrets."""
+    """Safely retrieves the [auth] dictionary from Streamlit secrets or environment variables."""
+    conf: dict[str, Any] = {}
     try:
         if "auth" in st.secrets:
-            return dict(st.secrets["auth"])
+            conf.update(dict(st.secrets["auth"]))
     except Exception:
         pass
-    return {}
+
+    # Environment variable fallbacks (useful for Docker & Cloud Run)
+    for key in (
+        "client_id",
+        "client_secret",
+        "redirect_uri",
+        "cookie_secret",
+        "server_metadata_url",
+    ):
+        env_val = os.getenv(f"STREAMLIT_AUTH_{key.upper()}") or os.getenv(
+            f"AUTH_{key.upper()}"
+        )
+        if env_val and key not in conf:
+            conf[key] = env_val
+
+    return conf
 
 
 def get_allowed_emails() -> set[str]:
