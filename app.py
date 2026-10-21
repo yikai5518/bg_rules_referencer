@@ -7,6 +7,7 @@ import streamlit as st
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
+from bg_rules_referencer.auth import render_user_badge, require_auth
 from bg_rules_referencer.ingestion import parse_rulebook_with_docling
 from bg_rules_referencer.pdf_parser import render_page_with_highlights
 from bg_rules_referencer.workflow import build_workflow
@@ -154,6 +155,9 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# Authentication & Access Control
+require_auth()
 
 # Initialize Session State
 if "memory" not in st.session_state:
@@ -323,6 +327,9 @@ with st.sidebar:
         """
     )
     st.caption("Powered by PyMuPDF, LangGraph & Gemini")
+
+    # User Profile & Logout
+    render_user_badge()
 
 # --- Header ---
 st.markdown(
