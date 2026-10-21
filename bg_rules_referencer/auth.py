@@ -109,10 +109,10 @@ def remove_allowed_email(email: str) -> bool:
 
 
 def get_admin_emails() -> set[str]:
-    """Retrieves administrator emails who have permission to manage the whitelist."""
+    """Retrieves administrator emails from Streamlit secrets or environment variables."""
     admins: set[str] = set()
 
-    # 1. From st.secrets
+    # 1. From st.secrets (top-level or inside [auth])
     try:
         for key in ("admin_emails", "admin_email"):
             if key in st.secrets:
@@ -151,15 +151,7 @@ def is_admin_user() -> bool:
     if not getattr(st.user, "is_logged_in", False):
         return False
     user_email = (getattr(st.user, "email", None) or "").strip().lower()
-    admins = get_admin_emails()
-    if admins:
-        return user_email in admins
-
-    # Default owner fallback
-    if user_email == "yikai5518@gmail.com":
-        return True
-
-    return False
+    return user_email in get_admin_emails()
 
 
 def get_allowed_emails() -> set[str]:
@@ -200,17 +192,21 @@ def get_allowed_emails() -> set[str]:
 
 
 def is_auth_configured() -> bool:
-    """Checks whether Google OAuth has been configured in Streamlit secrets or env vars."""
+    """Checks whether Google OAuth and admin email have been configured."""
     auth_conf = get_auth_config()
     client_id = auth_conf.get("client_id", "")
     client_secret = auth_conf.get("client_secret", "")
+    admins = get_admin_emails()
 
-    return bool(
+    has_client = bool(
         client_id
         and client_secret
         and "YOUR_GOOGLE_CLIENT_ID" not in client_id
         and "YOUR_GOOGLE_CLIENT_SECRET" not in client_secret
     )
+
+    # Fail if OAuth credentials or admin email are not configured
+    return has_client and bool(admins)
 
 
 def require_auth() -> bool:
@@ -363,10 +359,7 @@ cookie_secret = "generate_a_random_32_char_secret" # pragma: allowlist secret
 client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com" # pragma: allowlist secret
 client_secret = "YOUR_CLIENT_SECRET" # pragma: allowlist secret
 server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
-
-allowed_emails = [
-    "your.email@gmail.com",
-]</pre>
+admin_email = "your.email@gmail.com"</pre>
             <p style="color: #94a3b8; font-size: 0.85rem; margin-top: 1rem;">
                 Once saved, restart or reload Streamlit to activate Google login.
             </p>
