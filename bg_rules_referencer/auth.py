@@ -7,6 +7,30 @@ from typing import Any
 import streamlit as st
 
 
+def ensure_secrets_file_from_env() -> None:
+    """If .streamlit/secrets.toml doesn't exist on disk, synthesize it from environment variables."""
+    secrets_path = Path(".streamlit/secrets.toml")
+    if not secrets_path.exists() and os.getenv("STREAMLIT_AUTH_CLIENT_ID"):
+        try:
+            secrets_path.parent.mkdir(parents=True, exist_ok=True)
+            content = (
+                f"[auth]\n"
+                f'redirect_uri = "{os.getenv("STREAMLIT_AUTH_REDIRECT_URI", "http://localhost:8501/oauth2callback")}"\n'
+                f'cookie_secret = "{os.getenv("STREAMLIT_AUTH_COOKIE_SECRET", "")}"\n'
+                f'client_id = "{os.getenv("STREAMLIT_AUTH_CLIENT_ID", "")}"\n'
+                f'client_secret = "{os.getenv("STREAMLIT_AUTH_CLIENT_SECRET", "")}"\n'
+                f'server_metadata_url = "{os.getenv("STREAMLIT_AUTH_SERVER_METADATA_URL", "https://accounts.google.com/.well-known/openid-configuration")}"\n'
+                f'admin_email = "{os.getenv("ADMIN_EMAIL", "")}"\n'
+            )
+            secrets_path.write_text(content, encoding="utf-8")
+        except Exception:
+            pass
+
+
+# Ensure secrets file is present before Streamlit auth checks it
+ensure_secrets_file_from_env()
+
+
 def get_auth_config() -> dict[str, Any]:
     """Safely retrieves the [auth] dictionary from Streamlit secrets or environment variables."""
     conf: dict[str, Any] = {}

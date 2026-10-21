@@ -23,6 +23,9 @@ RUN uv pip install --system -e .
 # Copy project files
 COPY . .
 
+# Ensure entrypoint script is executable
+RUN chmod +x /app/entrypoint.sh
+
 # Google Cloud Run default port and Streamlit environment configuration
 ENV PORT=8080
 ENV STREAMLIT_SERVER_PORT=8080
@@ -32,4 +35,4 @@ ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
 EXPOSE 8080
 
-CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0"]
+ENTRYPOINT ["/app/entrypoint.sh"]
