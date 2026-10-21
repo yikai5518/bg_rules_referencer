@@ -1,8 +1,9 @@
 import operator
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any
 
 from langchain_core.messages import BaseMessage
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
 
@@ -11,21 +12,20 @@ class AgentState(BaseModel):
     The state shared between agents in the LangGraph workflow.
     """
 
-    messages: Annotated[List[BaseMessage], operator.add] = Field(default_factory=list)
-    game_name: Optional[str] = None
-    rulebook_filename: Optional[str] = None
-    rulebook_text: Optional[str] = None
-    query_intent: Optional[str] = None
-    keywords: List[str] = Field(default_factory=list)
-    relevant_chunks: List[str] = Field(default_factory=list)
-    highlight_snippets: List[str] = Field(default_factory=list)
-    referenced_pages: List[int] = Field(default_factory=list)
-    final_answer: Optional[str] = None
-
-    # Preserved optional fields for backwards compatibility
-    bgg_id: Optional[str] = None
-    game_options: List[Dict[str, str]] = Field(default_factory=list)
-    rulebook_url: Optional[str] = None
+    messages: Annotated[list[BaseMessage], operator.add] = Field(default_factory=list)
+    game_name: str | None = None
+    rulebook_filename: str | None = None
+    rulebook_text: str | None = None
+    query_intent: str | None = None
+    keywords: list[str] = Field(default_factory=list)
+    relevant_chunks: list[str] = Field(default_factory=list)
+    highlight_snippets: list[str] = Field(default_factory=list)
+    highlight_bboxes: dict[int, list[tuple[float, float, float, float]]] = Field(
+        default_factory=dict
+    )
+    referenced_pages: list[int] = Field(default_factory=list)
+    is_visual_query: bool = False
+    final_answer: str | None = None
 
 
 class BaseAgent(BaseModel, ABC):
@@ -37,7 +37,9 @@ class BaseAgent(BaseModel, ABC):
     name: str
 
     @abstractmethod
-    def __call__(self, state: AgentState) -> Dict[str, Any]:
+    def __call__(
+        self, state: AgentState, config: RunnableConfig | None = None
+    ) -> dict[str, Any]:
         """
         Executes the agent's logic.
         Must return a dictionary containing updates to the AgentState.

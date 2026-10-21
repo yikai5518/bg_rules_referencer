@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -16,7 +16,7 @@ class RulesJudgeAgent(BaseAgent):
     name: str = "rules_judge"
     model_name: str = "gemini-2.5-flash"
 
-    def __call__(self, state: AgentState) -> Dict[str, Any]:
+    def __call__(self, state: AgentState) -> dict[str, Any]:
         print(f"--- {self.name.replace('_', ' ').capitalize()} Agent ---")
 
         if not state.messages:
@@ -67,8 +67,9 @@ class RulesJudgeAgent(BaseAgent):
             return {"final_answer": formatted_answer}
 
         try:
+            model_name = settings.rules_judge_model or "gemini-3.8-flash"
             llm = ChatGoogleGenerativeAI(
-                model=self.model_name,
+                model=model_name,
                 api_key=settings.google_api_key,
                 temperature=0.2,
             )
@@ -102,12 +103,41 @@ class RulesJudgeAgent(BaseAgent):
                 ]
             )
 
-            final_text = response.content
-            return {"final_answer": final_text}
+            # Safely extract text string from response.content (handles strings, lists of content blocks, dicts)
+            raw_content = response.content
+            if isinstance(raw_content, str):
+                final_text = raw_content
+            elif isinstance(raw_content, list):
+                parts = []
+                for item in raw_content:
+                    if isinstance(item, dict) and "text" in item:
+                        parts.append(str(item["text"]))
+                    elif isinstance(item, str):
+                        parts.append(item)
+                    elif hasattr(item, "text"):
+                        parts.append(str(getattr(item, "text")))
+                    else:
+                        parts.append(str(item))
+                final_text = "".join(parts).strip()
+            elif isinstance(raw_content, dict) and "text" in raw_content:
+                final_text = str(raw_content["text"]).strip()
+            else:
+                final_text = str(raw_content).strip()
+
+            # Parse any pages cited directly in the LLM answer
+            cited_pages = []
+            for p in re.findall(r"(?:Page|P\.)\s*(\d+)", final_text, re.IGNORECASE):
+                val = int(p)
+                if val not in cited_pages:
+                    cited_pages.append(val)
+
+            merged_pages = cited_pages if cited_pages else referenced_pages
+            return {"final_answer": final_text, "referenced_pages": merged_pages}
 
         except Exception as e:
+            err_str = str(e)
             print(
-                f"Notice: Rules Judge LLM invocation failed ({e}). Returning extracted excerpts."
+                f"Notice: Rules Judge LLM invocation failed ({err_str}). Returning extracted excerpts."
             )
             formatted_chunks = []
             for chunk in chunks:
@@ -116,11 +146,18 @@ class RulesJudgeAgent(BaseAgent):
                 clean_text = re.sub(r"\[Page \d+\]\s*", "", chunk).strip()
                 formatted_chunks.append(f"**📄 {p_label}:**\n{clean_text}")
 
+            if "402" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                notice = "*(Note: AI synthesis is paused because your Google API prepayment credits are depleted. Displaying raw verified rulebook excerpts above.)*"
+            elif "404" in err_str or "NOT_FOUND" in err_str:
+                notice = f"*(Note: Model `{model_name}` was not found. Please check model settings.)*"
+            else:
+                notice = f"*(Notice: AI synthesis fallback active: {err_str})*"
+
             fallback_answer = (
                 f"### Rulebook Reference ({game_name})\n\n"
                 f"Here are the relevant excerpts extracted from your uploaded rulebook regarding your question:\n\n"
                 + "\n\n---\n\n".join(formatted_chunks)
                 + f"\n\n**📖 Referenced Pages:** {pages_str}\n\n"
-                f"*(Notice: AI synthesis unavailable due to API limit: {e})*"
+                + notice
             )
             return {"final_answer": fallback_answer}

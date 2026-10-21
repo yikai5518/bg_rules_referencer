@@ -18,7 +18,6 @@ This document defines core instructions, architectural context, development stan
   - `knowledge_extractor.py`: Chunks the uploaded rulebook page-by-page, ranks passages against query intent and keywords, and isolates `relevant_chunks`, `highlight_snippets`, and `referenced_pages`.
   - `rules_judge.py`: Synthesizes final ruling grounded strictly in extracted excerpts, enforcing in-line page citations (e.g. `(Page 4)`) and summary reference lines (`**📖 Referenced Pages:** Page X`).
   - `base.py`: Defines shared Pydantic `AgentState` and `BaseAgent`.
-  - `librarian.py`: (Legacy) Discovers and fetches PDFs online via search.
 - **`bg_rules_referencer/workflow.py`**:
   - Orchestrates streamlined multi-agent execution using **LangGraph** (`StateGraph`):
     `START -> orchestrator -> knowledge_extractor -> rules_judge -> END`.

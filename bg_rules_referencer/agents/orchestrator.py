@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
@@ -11,7 +11,7 @@ class QuestionIntent(BaseModel):
     intent: str = Field(
         description="A concise summary of what specific rules, actions, or mechanics the user is asking about."
     )
-    keywords: List[str] = Field(
+    keywords: list[str] = Field(
         default_factory=list,
         description="Key terms, concepts, actions, or components to look up in the rulebook.",
     )
@@ -19,23 +19,26 @@ class QuestionIntent(BaseModel):
         default="",
         description="The board game name if identified from the question, or empty string.",
     )
+    is_visual_query: bool = Field(
+        default=False,
+        description="Whether the user is asking about visual components, diagrams, board setup, icons, or card layouts.",
+    )
 
 
 class OrchestratorAgent(BaseAgent):
     """
-    Analyzes the user's question, identifies the rules intent and relevant
-    gameplay keywords for the uploaded rulebook, without external web searches.
+    Analyzes the user's question, identifies the rules intent, visual context,
+    and gameplay keywords using Google Gemini, with robust heuristic fallbacks.
     """
 
     name: str = "orchestrator"
-    model_name: str = "gemini-2.5-flash"
 
-    def __call__(self, state: AgentState) -> Dict[str, Any]:
+    def __call__(self, state: AgentState) -> dict[str, Any]:
         print(f"--- {self.name.capitalize()} Agent ---")
 
         # Get the latest message (user query)
         if not state.messages:
-            return {"query_intent": None, "keywords": []}
+            return {"query_intent": None, "keywords": [], "is_visual_query": False}
 
         last_message = str(state.messages[-1].content)
         current_game = state.game_name or "the board game"
@@ -72,8 +75,29 @@ class OrchestratorAgent(BaseAgent):
         ]
         fallback_intent = f"Question regarding: {last_message}"
 
-        # Check for API Key
+        # Heuristic check for visual keywords
+        visual_terms = {
+            "diagram",
+            "picture",
+            "image",
+            "setup",
+            "board",
+            "icon",
+            "symbol",
+            "layout",
+            "illustration",
+            "look",
+            "looks",
+            "tile",
+            "token",
+            "card",
+        }
+        is_visual = any(w.lower() in visual_terms for w in words)
+
+        # Check for API Key & settings
         from bg_rules_referencer.settings import settings
+
+        model_name = settings.orchestrator_model or "gemini-3.8-flash"
 
         if not settings.google_api_key:
             print("Warning: GOOGLE_API_KEY not found. Using heuristic extraction.")
@@ -81,21 +105,23 @@ class OrchestratorAgent(BaseAgent):
                 "query_intent": fallback_intent,
                 "keywords": fallback_keywords,
                 "game_name": state.game_name,
+                "is_visual_query": is_visual,
             }
 
         try:
             # Initialize the LLM
             llm = ChatGoogleGenerativeAI(
-                model=self.model_name, api_key=settings.google_api_key
+                model=model_name, api_key=settings.google_api_key
             )
             structured_llm = llm.with_structured_output(QuestionIntent)
 
-            print("Analyzing rules intent via LLM...")
+            print(f"Analyzing rules intent via LLM ({model_name})...")
             prompt = (
                 f"You are an expert board game rules analyst.\n"
                 f"Active Game: {current_game}\n"
                 f"User Question: {last_message}\n\n"
-                f"Extract the specific rules intent, gameplay concepts, and search keywords."
+                f"Extract the specific rules intent, gameplay concepts, search keywords, "
+                f"and indicate if this question is asking about visual components/diagrams/setup."
             )
             response: QuestionIntent = structured_llm.invoke(prompt)
 
@@ -109,11 +135,13 @@ class OrchestratorAgent(BaseAgent):
 
             print(f"Rules Intent: {extracted_intent}")
             print(f"Keywords: {extracted_keywords}")
+            print(f"Visual Query: {response.is_visual_query}")
 
             return {
                 "query_intent": extracted_intent,
                 "keywords": extracted_keywords,
                 "game_name": game_name,
+                "is_visual_query": response.is_visual_query or is_visual,
             }
         except Exception as e:
             print(
@@ -123,4 +151,5 @@ class OrchestratorAgent(BaseAgent):
                 "query_intent": fallback_intent,
                 "keywords": fallback_keywords,
                 "game_name": state.game_name,
+                "is_visual_query": is_visual,
             }

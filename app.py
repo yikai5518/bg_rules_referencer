@@ -1,14 +1,64 @@
+import ast
+import re
+from typing import Any
 import uuid
 
 import streamlit as st
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from bg_rules_referencer.pdf_parser import (
-    extract_text_from_pdf,
-    render_page_with_highlights,
-)
+from bg_rules_referencer.ingestion import parse_rulebook_with_docling
+from bg_rules_referencer.pdf_parser import render_page_with_highlights
 from bg_rules_referencer.workflow import build_workflow
+
+
+def format_message_text(content: Any) -> str:
+    """Safely extracts human-readable markdown text from string, list of dicts, or serialized dicts."""
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+            elif isinstance(item, str):
+                parts.append(item)
+            elif hasattr(item, "text"):
+                parts.append(str(getattr(item, "text")))
+            else:
+                parts.append(str(item))
+        return "".join(parts).strip()
+    if isinstance(content, dict) and "text" in content:
+        return str(content["text"]).strip()
+    if isinstance(content, str):
+        s = content.strip()
+        # Handle serialized python list/dict repr
+        if s.startswith("[{'type':") or s.startswith('[{"type":'):
+            try:
+                parsed = ast.literal_eval(s)
+                if isinstance(parsed, list):
+                    return format_message_text(parsed)
+            except Exception:
+                m = re.search(
+                    r"['\"]text['\"]\s*:\s*['\"](.*?)['\"]\s*,\s*['\"]extras['\"]",
+                    s,
+                    re.DOTALL,
+                )
+                if m:
+                    try:
+                        return m.group(1).encode().decode("unicode-escape")
+                    except Exception:
+                        return m.group(1)
+        return s
+    return str(content).strip()
+
+
+def set_viewer_page(target_page: int):
+    """Synchronously updates current_page and increments page_version to reset the input widget."""
+    max_p = st.session_state.get("page_count", 1) or 1
+    clamped = max(1, min(int(target_page), max_p))
+    if clamped != st.session_state.get("current_page", 1):
+        st.session_state.current_page = clamped
+        st.session_state.page_version = st.session_state.get("page_version", 0) + 1
+
 
 # Configure Streamlit page for wide side-by-side layout
 st.set_page_config(
@@ -119,6 +169,7 @@ if "messages" not in st.session_state:
 
 if "rulebook_text" not in st.session_state:
     st.session_state.rulebook_text = None
+    st.session_state.rulebook_doc = None
     st.session_state.rulebook_filename = None
     st.session_state.pdf_bytes = None
     st.session_state.game_name = None
@@ -126,13 +177,17 @@ if "rulebook_text" not in st.session_state:
     st.session_state.char_count = 0
     st.session_state.image_count = 0
     st.session_state.current_page = 1
+    st.session_state.page_version = 0
     st.session_state.active_highlights = []
+    st.session_state.active_highlight_bboxes = {}
     st.session_state.active_referenced_pages = []
 
 if "show_highlights" not in st.session_state:
     st.session_state.show_highlights = True
 if "show_diagram_frames" not in st.session_state:
     st.session_state.show_diagram_frames = True
+if "is_visual_query" not in st.session_state:
+    st.session_state.is_visual_query = False
 
 # --- Sidebar: PDF Ingestion & Viewer Controls ---
 with st.sidebar:
@@ -146,21 +201,29 @@ with st.sidebar:
 
     if uploaded_file is not None:
         if st.session_state.rulebook_filename != uploaded_file.name:
-            with st.spinner("Indexing PDF text & visual structure..."):
+            with st.spinner("Analyzing document structure & indexing with Docling..."):
                 raw_bytes = uploaded_file.getvalue()
-                text, metadata = extract_text_from_pdf(
+                rulebook_doc = parse_rulebook_with_docling(
                     raw_bytes, filename=uploaded_file.name
                 )
                 st.session_state.pdf_bytes = raw_bytes
-                st.session_state.rulebook_text = text
+                st.session_state.rulebook_doc = rulebook_doc
+                st.session_state.rulebook_text = rulebook_doc.full_text
                 st.session_state.rulebook_filename = uploaded_file.name
-                st.session_state.game_name = metadata.get("inferred_name", "Board Game")
-                st.session_state.page_count = metadata.get("page_count", 1)
-                st.session_state.char_count = metadata.get("char_count", 0)
-                st.session_state.image_count = metadata.get("image_count", 0)
+                st.session_state.game_name = rulebook_doc.metadata.get(
+                    "inferred_name", "Board Game"
+                )
+                st.session_state.page_count = rulebook_doc.metadata.get("page_count", 1)
+                st.session_state.char_count = rulebook_doc.metadata.get("char_count", 0)
+                st.session_state.image_count = rulebook_doc.metadata.get(
+                    "image_count", 0
+                )
                 st.session_state.current_page = 1
+                st.session_state.page_version = 0
                 st.session_state.active_highlights = []
+                st.session_state.active_highlight_bboxes = {}
                 st.session_state.active_referenced_pages = []
+                st.session_state.is_visual_query = False
 
                 # Reset thread and chat history
                 st.session_state.thread_id = str(uuid.uuid4())
@@ -212,9 +275,9 @@ with st.sidebar:
             help="Toggle translucent yellow highlights on referenced text passages.",
         )
         st.session_state.show_diagram_frames = st.checkbox(
-            "🖼️ Diagram Frames",
+            "🖼️ Diagram Frames (Visual Queries)",
             value=st.session_state.show_diagram_frames,
-            help="Toggle accent bounding boxes framing diagrams and visual elements.",
+            help="Frame diagrams and components when questions ask about visual elements, setup, or icons.",
         )
 
         if st.button("🗑️ Clear / Reset Rulebook", use_container_width=True):
@@ -226,14 +289,30 @@ with st.sidebar:
             st.session_state.char_count = 0
             st.session_state.image_count = 0
             st.session_state.current_page = 1
+            st.session_state.page_version = 0
             st.session_state.active_highlights = []
             st.session_state.active_referenced_pages = []
+            st.session_state.is_visual_query = False
             st.session_state.messages = []
             st.session_state.thread_id = str(uuid.uuid4())
             st.session_state.config = {
                 "configurable": {"thread_id": st.session_state.thread_id}
             }
             st.rerun()
+
+        from bg_rules_referencer.settings import settings
+
+        st.markdown("#### 🤖 Active Models")
+        st.markdown(
+            f"""
+            <div class="stat-card" style="font-size: 0.8rem;">
+                <div>⚡ <b>Router:</b> <code>{settings.orchestrator_model}</code></div>
+                <div>⚖️ <b>Judge:</b> <code>{settings.rules_judge_model}</code></div>
+                <div>🖼️ <b>Vision:</b> <code>{settings.vision_model}</code></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
     st.markdown(
@@ -302,22 +381,20 @@ else:
                 use_container_width=True,
                 disabled=st.session_state.current_page <= 1,
             ):
-                st.session_state.current_page = max(
-                    1, st.session_state.current_page - 1
-                )
+                set_viewer_page(st.session_state.current_page - 1)
                 st.rerun()
 
         with nav_c2:
             new_page = st.number_input(
                 "Page",
                 min_value=1,
-                max_value=st.session_state.page_count,
+                max_value=max(1, st.session_state.page_count),
                 value=st.session_state.current_page,
+                key=f"page_selector_{st.session_state.get('page_version', 0)}",
                 label_visibility="collapsed",
-                key="page_num_input",
             )
             if new_page != st.session_state.current_page:
-                st.session_state.current_page = new_page
+                set_viewer_page(new_page)
                 st.rerun()
 
         with nav_c3:
@@ -326,9 +403,7 @@ else:
                 use_container_width=True,
                 disabled=st.session_state.current_page >= st.session_state.page_count,
             ):
-                st.session_state.current_page = min(
-                    st.session_state.page_count, st.session_state.current_page + 1
-                )
+                set_viewer_page(st.session_state.current_page + 1)
                 st.rerun()
 
         with nav_c4:
@@ -339,7 +414,7 @@ else:
                     use_container_width=True,
                     help="Jump to primary cited page",
                 ):
-                    st.session_state.current_page = primary_p
+                    set_viewer_page(primary_p)
                     st.rerun()
 
         # Multi-page Citation Quick-Jump Pills
@@ -357,23 +432,56 @@ else:
                         type=btn_type,
                         use_container_width=True,
                     ):
-                        st.session_state.current_page = p
+                        set_viewer_page(p)
                         st.rerun()
 
-        # Render PDF Page with Highlights
-        with st.spinner("Rendering page..."):
-            page_png, hl_count, img_count = render_page_with_highlights(
-                st.session_state.pdf_bytes,
-                page_num=st.session_state.current_page,
-                highlight_texts=st.session_state.active_highlights
-                if st.session_state.show_highlights
-                else None,
-                highlight_images=st.session_state.show_diagram_frames,
-                dpi=150,
+        # Only apply highlights and diagram framing if a ruling has actively cited this page
+        is_page_cited = (
+            bool(st.session_state.active_highlights)
+            or bool(st.session_state.active_highlight_bboxes)
+        ) and (
+            not st.session_state.active_referenced_pages
+            or st.session_state.current_page in st.session_state.active_referenced_pages
+        )
+        active_hl_texts = (
+            st.session_state.active_highlights
+            if (st.session_state.show_highlights and is_page_cited)
+            else None
+        )
+        active_hl_rects = (
+            st.session_state.active_highlight_bboxes.get(
+                st.session_state.current_page, []
             )
+            if (st.session_state.show_highlights and is_page_cited)
+            else None
+        )
+        # Only frame diagrams when the question specifically asks about visual elements/setup
+        should_highlight_images = (
+            st.session_state.show_diagram_frames
+            and is_page_cited
+            and st.session_state.get("is_visual_query", False)
+        )
 
-        # Display rendered page
-        st.image(page_png, use_container_width=True)
+        # Render PDF Page with Highlights
+        hl_count = 0
+        img_count = 0
+        try:
+            with st.spinner("Rendering page..."):
+                page_png, hl_count, img_count = render_page_with_highlights(
+                    st.session_state.pdf_bytes,
+                    page_num=st.session_state.current_page,
+                    highlight_texts=active_hl_texts,
+                    highlight_rects=active_hl_rects,
+                    highlight_images=should_highlight_images,
+                    dpi=150,
+                    game_name=st.session_state.game_name,
+                )
+            try:
+                st.image(page_png, width="stretch")
+            except TypeError:
+                st.image(page_png, use_container_width=True)
+        except Exception as e:
+            st.error(f"⚠️ Error rendering page {st.session_state.current_page}: {e}")
 
         # Page summary footer caption
         hl_info = []
@@ -399,10 +507,20 @@ else:
         with chat_container:
             for m_idx, msg in enumerate(st.session_state.messages):
                 with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
+                    msg_text = format_message_text(msg.get("content", ""))
+                    st.markdown(msg_text)
 
                     # If assistant message contains referenced pages, provide jump buttons
                     ref_pages = msg.get("referenced_pages", [])
+                    if not ref_pages and msg["role"] == "assistant":
+                        extracted = [
+                            int(p)
+                            for p in re.findall(
+                                r"(?:Page|P\.)\s*(\d+)", msg_text, re.IGNORECASE
+                            )
+                        ]
+                        ref_pages = list(dict.fromkeys(extracted))
+
                     if msg["role"] == "assistant" and ref_pages:
                         p_cols = st.columns(len(ref_pages) + 1)
                         for p_idx, p in enumerate(ref_pages):
@@ -412,7 +530,11 @@ else:
                                     key=f"msg_btn_{m_idx}_{p}_{p_idx}",
                                     help=f"Jump PDF viewer to Page {p}",
                                 ):
-                                    st.session_state.current_page = p
+                                    set_viewer_page(p)
+                                    if msg.get("highlight_bboxes"):
+                                        st.session_state.active_highlight_bboxes = msg[
+                                            "highlight_bboxes"
+                                        ]
                                     if msg.get("highlight_snippets"):
                                         st.session_state.active_highlights = msg[
                                             "highlight_snippets"
@@ -449,9 +571,15 @@ else:
                             "rulebook_filename": st.session_state.rulebook_filename,
                             "rulebook_text": st.session_state.rulebook_text,
                         }
+                        run_config = {
+                            "configurable": {
+                                **st.session_state.config.get("configurable", {}),
+                                "rulebook_doc": st.session_state.get("rulebook_doc"),
+                            }
+                        }
 
                         for event in st.session_state.app.stream(
-                            initial_input, config=st.session_state.config
+                            initial_input, config=run_config
                         ):
                             for node_name, state_update in event.items():
                                 if node_name == "orchestrator":
@@ -469,16 +597,29 @@ else:
                                         "⚖️ **Rules Judge:** Formulated definitive ruling with citations."
                                     )
 
-                        final_state = st.session_state.app.get_state(
-                            st.session_state.config
-                        ).values
+                        final_state = st.session_state.app.get_state(run_config).values
 
-                        response_text = final_state.get(
-                            "final_answer", "Sorry, I could not determine an answer."
+                        response_text = format_message_text(
+                            final_state.get(
+                                "final_answer",
+                                "Sorry, I could not determine an answer.",
+                            )
                         )
                         excerpts = final_state.get("relevant_chunks", [])
                         ref_pages = final_state.get("referenced_pages", [])
+                        if not ref_pages:
+                            extracted = [
+                                int(p)
+                                for p in re.findall(
+                                    r"(?:Page|P\.)\s*(\d+)",
+                                    response_text,
+                                    re.IGNORECASE,
+                                )
+                            ]
+                            ref_pages = list(dict.fromkeys(extracted))
+
                         hl_snippets = final_state.get("highlight_snippets", [])
+                        hl_bboxes = final_state.get("highlight_bboxes", {})
 
                         status_container.update(
                             label="Ruling complete!", state="complete", expanded=False
@@ -486,11 +627,15 @@ else:
 
                         # Update session active highlights and referenced pages
                         st.session_state.active_highlights = hl_snippets
+                        st.session_state.active_highlight_bboxes = hl_bboxes
                         st.session_state.active_referenced_pages = ref_pages
+                        st.session_state.is_visual_query = final_state.get(
+                            "is_visual_query", False
+                        )
 
                         # Auto-snap left viewer to primary referenced page
                         if ref_pages:
-                            st.session_state.current_page = ref_pages[0]
+                            set_viewer_page(ref_pages[0])
 
                         # Append to chat messages
                         st.session_state.messages.append(
@@ -499,6 +644,7 @@ else:
                                 "content": response_text,
                                 "referenced_pages": ref_pages,
                                 "highlight_snippets": hl_snippets,
+                                "highlight_bboxes": hl_bboxes,
                                 "excerpts": excerpts,
                             }
                         )

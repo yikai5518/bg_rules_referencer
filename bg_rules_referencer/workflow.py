@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
@@ -39,9 +39,10 @@ def build_workflow(checkpointer=None):
 
 def query_rules(
     query: str,
-    rulebook_text: Optional[str] = None,
-    game_name: Optional[str] = None,
-    rulebook_filename: Optional[str] = None,
+    rulebook_text: str | None = None,
+    game_name: str | None = None,
+    rulebook_filename: str | None = None,
+    rulebook_doc: Any | None = None,
 ) -> str:
     """
     Main entry point for querying the board game rules helper with an uploaded rulebook.
@@ -56,8 +57,15 @@ def query_rules(
         rulebook_text=rulebook_text,
     )
 
+    # Pass rulebook_doc via config without serializing into checkpoints
+    config = (
+        {"configurable": {"rulebook_doc": rulebook_doc}}
+        if rulebook_doc is not None
+        else None
+    )
+
     # Run the graph
-    result = app.invoke(initial_state)
+    result = app.invoke(initial_state, config=config)
 
     # Return the final formulated answer
     return result.get("final_answer", "Sorry, I could not determine an answer.")
