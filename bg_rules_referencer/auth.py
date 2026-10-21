@@ -1,5 +1,7 @@
-import os
 from collections.abc import Mapping
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -31,13 +33,144 @@ def get_auth_config() -> dict[str, Any]:
     return conf
 
 
-def get_allowed_emails() -> set[str]:
-    """Retrieves the set of authorized emails from Streamlit secrets or environment variables."""
-    emails: set[str] = set()
+def get_dynamic_users_file() -> Path:
+    """Returns the persistent file path used for dynamic whitelist additions."""
+    custom_path = os.getenv("ALLOWED_USERS_FILE")
+    if custom_path:
+        return Path(custom_path)
+
+    # Cloud Run volume mount or Docker persistent data directory
+    if os.path.isdir("/data") and os.access("/data", os.W_OK):
+        return Path("/data/allowed_users.json")
+
+    # Local development (.streamlit directory)
+    streamlit_dir = Path(".streamlit")
+    if streamlit_dir.is_dir():
+        return streamlit_dir / "allowed_users.json"
+
+    return Path("allowed_users.json")
+
+
+def get_dynamic_allowed_emails() -> set[str]:
+    """Reads dynamically added user emails from the persistent JSON file."""
+    file_path = get_dynamic_users_file()
+    if not file_path.exists():
+        return set()
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return {str(e).strip().lower() for e in data if e}
+        elif isinstance(data, dict):
+            items = data.get("allowed_emails", [])
+            return {str(e).strip().lower() for e in items if e}
+    except Exception:
+        pass
+    return set()
+
+
+def add_allowed_email(email: str) -> bool:
+    """Adds a new email to the dynamic whitelist JSON file."""
+    clean_email = email.strip().lower()
+    if not clean_email or "@" not in clean_email:
+        return False
+
+    current = get_dynamic_allowed_emails()
+    current.add(clean_email)
+
+    file_path = get_dynamic_users_file()
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(
+            json.dumps({"allowed_emails": sorted(list(current))}, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def remove_allowed_email(email: str) -> bool:
+    """Removes an email from the dynamic whitelist JSON file."""
+    clean_email = email.strip().lower()
+    current = get_dynamic_allowed_emails()
+    if clean_email in current:
+        current.remove(clean_email)
+        file_path = get_dynamic_users_file()
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(
+                json.dumps({"allowed_emails": sorted(list(current))}, indent=2),
+                encoding="utf-8",
+            )
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def get_admin_emails() -> set[str]:
+    """Retrieves administrator emails who have permission to manage the whitelist."""
+    admins: set[str] = set()
 
     # 1. From st.secrets
     try:
-        # Check top-level allowed_emails
+        for key in ("admin_emails", "admin_email"):
+            if key in st.secrets:
+                val = st.secrets[key]
+                if isinstance(val, (list, tuple, set)):
+                    admins.update(str(e).strip().lower() for e in val if e)
+                elif isinstance(val, str):
+                    admins.update(
+                        e.strip().lower() for e in val.split(",") if e.strip()
+                    )
+
+        auth_conf = st.secrets.get("auth", {})
+        if isinstance(auth_conf, Mapping):
+            for key in ("admin_emails", "admin_email"):
+                if key in auth_conf:
+                    val = auth_conf[key]
+                    if isinstance(val, (list, tuple, set)):
+                        admins.update(str(e).strip().lower() for e in val if e)
+                    elif isinstance(val, str):
+                        admins.update(
+                            e.strip().lower() for e in val.split(",") if e.strip()
+                        )
+    except Exception:
+        pass
+
+    # 2. From environment variables
+    env_admin = os.getenv("ADMIN_EMAILS") or os.getenv("ADMIN_EMAIL")
+    if env_admin:
+        admins.update(e.strip().lower() for e in env_admin.split(",") if e.strip())
+
+    return admins
+
+
+def is_admin_user() -> bool:
+    """Returns True if the currently authenticated user is an administrator."""
+    if not getattr(st.user, "is_logged_in", False):
+        return False
+    user_email = (getattr(st.user, "email", None) or "").strip().lower()
+    admins = get_admin_emails()
+    if admins:
+        return user_email in admins
+
+    # Default owner fallback
+    if user_email == "yikai5518@gmail.com":
+        return True
+
+    return False
+
+
+def get_allowed_emails() -> set[str]:
+    """Retrieves the complete set of authorized emails (admins, secrets, env, and dynamic)."""
+    emails: set[str] = set()
+
+    # Admins are always allowed
+    emails.update(get_admin_emails())
+
+    # 1. From st.secrets
+    try:
         if "allowed_emails" in st.secrets:
             items = st.secrets["allowed_emails"]
             if isinstance(items, (list, tuple, set)):
@@ -45,7 +178,6 @@ def get_allowed_emails() -> set[str]:
             elif isinstance(items, str):
                 emails.update(e.strip().lower() for e in items.split(",") if e.strip())
 
-        # Check [auth.allowed_emails]
         auth_conf = st.secrets.get("auth", {})
         if isinstance(auth_conf, Mapping) and "allowed_emails" in auth_conf:
             items = auth_conf["allowed_emails"]
@@ -56,21 +188,23 @@ def get_allowed_emails() -> set[str]:
     except Exception:
         pass
 
-    # 2. From environment variables (ALLOWED_EMAILS or WHITELISTED_EMAILS)
+    # 2. From environment variables
     env_str = os.getenv("ALLOWED_EMAILS") or os.getenv("WHITELISTED_EMAILS") or ""
     if env_str:
         emails.update(e.strip().lower() for e in env_str.split(",") if e.strip())
+
+    # 3. From dynamic in-app additions
+    emails.update(get_dynamic_allowed_emails())
 
     return emails
 
 
 def is_auth_configured() -> bool:
-    """Checks whether Google OAuth has been configured in Streamlit secrets."""
+    """Checks whether Google OAuth has been configured in Streamlit secrets or env vars."""
     auth_conf = get_auth_config()
     client_id = auth_conf.get("client_id", "")
     client_secret = auth_conf.get("client_secret", "")
 
-    # Ensure not empty and not an unfilled placeholder
     return bool(
         client_id
         and client_secret
@@ -94,13 +228,11 @@ def require_auth() -> bool:
         _render_unconfigured_screen()
         st.stop()
 
-    # Check login status using Streamlit native st.user
     is_logged_in = getattr(st.user, "is_logged_in", False)
     if not is_logged_in:
         _render_login_screen()
         st.stop()
 
-    # Verify email against whitelist
     user_email = (getattr(st.user, "email", None) or "").strip().lower()
     allowed = get_allowed_emails()
 
@@ -112,20 +244,90 @@ def require_auth() -> bool:
 
 
 def render_user_badge() -> None:
-    """Renders user info and a sign-out button in the sidebar."""
+    """Renders user info, admin whitelist manager, and a sign-out button in the sidebar."""
     if not getattr(st.user, "is_logged_in", False):
         return
 
     name = getattr(st.user, "name", None) or "User"
-    email = getattr(st.user, "email", None) or ""
+    email = (getattr(st.user, "email", None) or "").strip().lower()
+    is_admin = is_admin_user()
 
     st.sidebar.markdown("---")
-    col1, col2 = st.sidebar.columns([3, 1])
+
+    # In-App Admin Whitelist Management (Only visible to admins)
+    if is_admin:
+        with st.sidebar.expander("⚙️ Manage Whitelist", expanded=False):
+            st.markdown(
+                "<span style='font-size: 0.82rem; color: #94a3b8;'>Add or remove Google emails allowed to access this app.</span>",
+                unsafe_allow_html=True,
+            )
+
+            # Add Email Input
+            col_in, col_btn = st.columns([3, 1])
+            with col_in:
+                new_email = st.text_input(
+                    "User Email",
+                    placeholder="player@gmail.com",
+                    label_visibility="collapsed",
+                    key="admin_add_email_input",
+                )
+            with col_btn:
+                if st.button(
+                    "➕", help="Add email to whitelist", key="admin_add_email_btn"
+                ):
+                    if new_email and "@" in new_email:
+                        if add_allowed_email(new_email):
+                            st.toast(f"✅ Added {new_email} to whitelist")
+                            st.rerun()
+                        else:
+                            st.error("Failed to add email.")
+                    else:
+                        st.warning("Enter a valid email address.")
+
+            # List Current Whitelisted Emails
+            dynamic_emails = get_dynamic_allowed_emails()
+            all_emails = sorted(list(get_allowed_emails()))
+            admin_emails = get_admin_emails()
+
+            st.markdown(
+                f"<div style='font-size: 0.8rem; font-weight: 600; margin-top: 0.5rem; margin-bottom: 0.25rem;'>"
+                f"Active Users ({len(all_emails)})</div>",
+                unsafe_allow_html=True,
+            )
+
+            for u_email in all_emails:
+                u_col, b_col = st.columns([4, 1])
+                with u_col:
+                    if u_email in admin_emails:
+                        st.markdown(
+                            f"<span style='font-size: 0.78rem; color: #a855f7;'>👑 <code>{u_email}</code></span>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            f"<span style='font-size: 0.78rem; color: #cbd5e1;'>👤 <code>{u_email}</code></span>",
+                            unsafe_allow_html=True,
+                        )
+                with b_col:
+                    # Allow removing dynamically added emails (admins cannot remove admin accounts here)
+                    if u_email in dynamic_emails and u_email not in admin_emails:
+                        if st.button(
+                            "🗑️",
+                            key=f"del_user_{u_email}",
+                            help=f"Revoke access for {u_email}",
+                        ):
+                            if remove_allowed_email(u_email):
+                                st.toast(f"🗑️ Removed {u_email}")
+                                st.rerun()
+
+    # User Profile & Logout
+    col1, col2 = st.sidebar.columns([3, 1.2])
     with col1:
-        st.caption(f"👤 Signed in as **{name}**\n`{email}`")
+        admin_badge = " *(Admin)*" if is_admin else ""
+        st.caption(f"👤 **{name}**{admin_badge}\n`{email}`")
     with col2:
         if st.button(
-            "🚪 Logout", key="auth_logout_btn", help="Sign out of your account"
+            "🚪 Sign out", key="auth_logout_btn", help="Sign out of your account"
         ):
             st.logout()
 
@@ -158,7 +360,7 @@ def _render_unconfigured_screen() -> None:
 [auth]
 redirect_uri = "http://localhost:8501/oauth2callback"
 cookie_secret = "generate_a_random_32_char_secret" # pragma: allowlist secret
-client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com" # pragma: allowlist secret
 client_secret = "YOUR_CLIENT_SECRET" # pragma: allowlist secret
 server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 
